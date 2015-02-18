@@ -15,7 +15,7 @@ namespace Breeze.ContextProvider.NH {
   public class NHContext : Breeze.ContextProvider.ContextProvider, IDisposable {
     private ISession session;
     //protected Configuration configuration;
-    private static Dictionary<ISessionFactory, IDictionary<string, object>> _factoryMetadata = new Dictionary<ISessionFactory, IDictionary<string, object>>();
+    private static Dictionary<ISessionFactory, Metadata> _factoryMetadata = new Dictionary<ISessionFactory, Metadata>();
     private static object _metadataLock = new object();
 
     /// <summary>
@@ -135,7 +135,37 @@ namespace Breeze.ContextProvider.NH {
         return entitiesToPersist;
     }
 
+    /// <summary>
+    /// If TypeFilter function is defined, returns TypeFilter(entityInfo.Entity.GetType())
+    /// </summary>
+    /// <param name="entityInfo"></param>
+    /// <returns>true if the entity should be saved, false if not</returns>
+    protected override bool BeforeSaveEntity(EntityInfo entityInfo)
+    {
+        if (!base.BeforeSaveEntity(entityInfo)) return false;
+        if (this.TypeFilter == null) return true;
+        return this.TypeFilter(entityInfo.Entity.GetType());
+    }
+
     #region Metadata
+
+    /// <summary>
+    /// Sets a function to filter types from metadata generation and SaveChanges.
+    /// The function returns true if a Type should be included, false otherwise.
+    /// </summary><example>
+    /// // exclude the LogRecord entity
+    /// MyNHContext.TypeFilter = (type) => type.Name != "LogRecord";
+    /// </example><example>
+    /// // exclude certain entities, and all Audit* entities
+    /// var excluded = new string[] { "Comment", "LogRecord", "UserPermission" };
+    /// MyNHContext.TypeFilter = (type) =>
+    /// {
+    ///   if (excluded.Contains(type.Name)) return false;
+    ///   if (type.Name.StartsWith("Audit")) return false;
+    ///   return true;
+    /// };
+    /// </example>
+    public Func<Type, bool> TypeFilter { get; set; }
 
     protected override string BuildJsonMetadata() {
       var meta = GetMetadata();
@@ -149,13 +179,13 @@ namespace Breeze.ContextProvider.NH {
       return json;
     }
 
-    protected IDictionary<string, object> GetMetadata() {
+    protected Metadata GetMetadata() {
       if (_metadata == null) {
           lock (_metadataLock) {
               if (!_factoryMetadata.TryGetValue(session.SessionFactory, out _metadata)) {
                   //var builder = new NHBreezeMetadata(session.SessionFactory, configuration);
                   var builder = new NHMetadataBuilder(session.SessionFactory);
-                  _metadata = builder.BuildMetadata();
+                  _metadata = builder.BuildMetadata(TypeFilter);
                   _factoryMetadata.Add(session.SessionFactory, _metadata);
               }
           }
@@ -168,7 +198,7 @@ namespace Breeze.ContextProvider.NH {
 
     private Dictionary<EntityInfo, KeyMapping> EntityKeyMapping = new Dictionary<EntityInfo, KeyMapping>();
     private List<EntityError> entityErrors = new List<EntityError>();
-    private IDictionary<string, object> _metadata;
+    private Metadata _metadata;
 
     /// <summary>
     /// Persist the changes to the entities in the saveMap.
@@ -227,7 +257,7 @@ namespace Breeze.ContextProvider.NH {
     /// <returns></returns>
     protected NHRelationshipFixer GetRelationshipFixer(Dictionary<Type, List<EntityInfo>> saveMap) {
         // Get the map of foreign key relationships from the metadata
-        var fkMap = (IDictionary<string, string>)GetMetadata()[NHMetadataBuilder.FK_MAP];
+        var fkMap = GetMetadata().ForeignKeyMap;
         return new NHRelationshipFixer(saveMap, fkMap, session);
     }
 
@@ -262,6 +292,7 @@ namespace Breeze.ContextProvider.NH {
       }
 
       if (state == EntityState.Modified) {
+        CheckForKeyUpdate(entityInfo, classMeta);
         session.Update(entity);
       } else if (state == EntityState.Added) {
         session.Save(entity);
@@ -270,6 +301,21 @@ namespace Breeze.ContextProvider.NH {
       } else {
         // Ignore EntityState.Unchanged.  Too many problems using session.Lock or session.Merge
         //session.Lock(entity, LockMode.None);
+      }
+    }
+
+    protected void CheckForKeyUpdate(EntityInfo entityInfo, IClassMetadata classMeta) {
+      if (classMeta.HasIdentifierProperty && entityInfo.OriginalValuesMap != null
+        && entityInfo.OriginalValuesMap.ContainsKey(classMeta.IdentifierPropertyName)) {
+        var errors = new EntityError[1] {
+            new EntityError() {
+              EntityTypeName = entityInfo.Entity.GetType().FullName,
+              ErrorMessage = "Cannot update part of the entity's key",
+              ErrorName = "KeyUpdateException",
+              KeyValues = GetIdentifierAsArray(entityInfo.Entity, classMeta),
+              PropertyName = classMeta.IdentifierPropertyName
+            }};
+        throw new EntityErrorsException("Cannot update part of the entity's key", errors);
       }
     }
 

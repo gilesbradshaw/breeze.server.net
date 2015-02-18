@@ -51,18 +51,23 @@ namespace Sample_WebApi2.Controllers {
 
 #if CODEFIRST_PROVIDER
   public class NorthwindContextProvider: EFContextProvider<NorthwindIBContext_CF>  {
+    public const string CONFIG_VERSION = "CODEFIRST_PROVIDER";
     public NorthwindContextProvider() : base() { }
 #elif DATABASEFIRST_OLD
   public class NorthwindContextProvider: EFContextProvider<NorthwindIBContext_EDMX>  {
+    public const string CONFIG_VERSION = "DATABASEFIRST_OLD";
     public NorthwindContextProvider() : base() { }
 #elif DATABASEFIRST_NEW
   public class NorthwindContextProvider : EFContextProvider<NorthwindIBContext_EDMX_2012> {
+    public const string CONFIG_VERSION = "DATABASEFIRST_NEW";
     public NorthwindContextProvider() : base() { }
 #elif ORACLE_EDMX
   public class NorthwindContextProvider : EFContextProvider<NorthwindIBContext_EDMX_Oracle> {
+    public const string CONFIG_VERSION = "ORACLE_EDMX";
     public NorthwindContextProvider() : base() { }
 #elif NHIBERNATE
   public class NorthwindContextProvider : NorthwindNHContext {
+    public const string CONFIG_VERSION = "NHIBERNATE";
 #endif
 
     protected override void AfterSaveEntities(Dictionary<Type, List<EntityInfo>> saveMap, List<KeyMapping> keyMappings) {
@@ -85,6 +90,12 @@ namespace Sample_WebApi2.Controllers {
         LookupEmployeeInSeparateContext(true);
       }
       base.AfterSaveEntities(saveMap, keyMappings);
+    }
+
+    public Dictionary<Type, List<EntityInfo>> GetSaveMapFromSaveBundle(JObject saveBundle) {
+      InitializeSaveState(saveBundle); // Sets initial EntityInfos
+      SaveWorkState.BeforeSave();      // Creates the SaveMap as byproduct of BeforeSave logic
+      return SaveWorkState.SaveMap;
     }
 
 #if (CODEFIRST_PROVIDER || DATABASEFIRST_NEW || DATABASEFIRST_OLD)
@@ -343,9 +354,12 @@ namespace Sample_WebApi2.Controllers {
       ContextProvider.BeforeSaveEntitiesDelegate = AddComment;
       return ContextProvider.SaveChanges(saveBundle);
     }
-    
+
     [HttpPost]
     public SaveResult SaveWithExit(JObject saveBundle) {
+      // set break points here to see how these two approaches give you a SaveMap w/o saving.
+      var saveMap =  ContextProvider.GetSaveMapFromSaveBundle(saveBundle);
+      saveMap = new NorthwindIBDoNotSaveContext().GetSaveMapFromSaveBundle(saveBundle);
       return new SaveResult() { Entities = new List<Object>(), KeyMappings = new List<KeyMapping>() };
     }
 
@@ -567,7 +581,7 @@ namespace Sample_WebApi2.Controllers {
 #if NHIBERNATE
     [BreezeNHQueryable(MaxAnyAllExpressionDepth = 3)]
 #else
-    [BreezeQueryable(MaxAnyAllExpressionDepth = 3)]
+    [EnableBreezeQuery(MaxAnyAllExpressionDepth = 3)]
 #endif
     public IQueryable<Customer> Customers() {
       var custs = ContextProvider.Context.Customers;
@@ -609,7 +623,7 @@ namespace Sample_WebApi2.Controllers {
 #if NHIBERNATE
     [BreezeNHQueryable(MaxExpansionDepth = 3)]
 #else
-    [BreezeQueryable(MaxExpansionDepth = 3)]
+    [EnableBreezeQuery(MaxExpansionDepth = 3)]
 #endif
     public IQueryable<Order> Orders() {
       var orders = ContextProvider.Context.Orders;
@@ -622,7 +636,7 @@ namespace Sample_WebApi2.Controllers {
     }
 
     [HttpGet]
-    [BreezeQueryable]
+    [EnableBreezeQuery]
     public IEnumerable<Employee> EnumerableEmployees() {
       return ContextProvider.Context.Employees.ToList();
     }
@@ -924,12 +938,65 @@ namespace Sample_WebApi2.Controllers {
 #if NHIBERNATE
     [BreezeNHQueryable]
 #else
-    [BreezeQueryable]
+    [EnableBreezeQuery]
 #endif
     public HttpResponseMessage CustomersAsHRM() {
       var customers = ContextProvider.Context.Customers.Cast<Customer>();
       var response = Request.CreateResponse(HttpStatusCode.OK, customers);
       return response;
+    }
+
+    [HttpGet]
+    public IQueryable<OrderDetail> OrderDetailsMultiple(int multiple, string expands)
+    {
+        var query = ContextProvider.Context.OrderDetails.OfType<OrderDetail>();
+        if (!string.IsNullOrWhiteSpace(expands)) {
+            var segs = expands.Split(',').ToList();
+            segs.ForEach(s => {
+                query = ((System.Data.Entity.Infrastructure.DbQuery<OrderDetail>) query).Include(s);
+            });
+        }
+        var orig = query.ToList();
+        var list = new List<OrderDetail>(orig.Count * multiple);
+        for (var i = 0; i < multiple; i++)
+        {
+            for (var j = 0; j < orig.Count; j++)
+            {
+                var od = orig[j];
+                var newProductID = i * j + 1;
+                var clone = new OrderDetail();
+                clone.Order = od.Order;
+                clone.OrderID = od.OrderID;
+                clone.RowVersion = od.RowVersion;
+                clone.UnitPrice = od.UnitPrice;
+                clone.Quantity = (short)multiple;
+                clone.Discount = i;
+                clone.ProductID = newProductID;
+
+                if (od.Product != null) {
+                    var p = new Product();
+                    var op = od.Product;
+                    p.ProductID = newProductID;
+                    p.Category = op.Category;
+                    p.CategoryID = op.CategoryID;
+                    p.Discontinued = op.Discontinued;
+                    p.DiscontinuedDate = op.DiscontinuedDate;
+                    p.ProductName = op.ProductName;
+                    p.QuantityPerUnit = op.QuantityPerUnit;
+                    p.ReorderLevel = op.ReorderLevel;
+                    p.RowVersion = op.RowVersion;
+                    p.Supplier = op.Supplier;
+                    p.SupplierID = op.SupplierID;
+                    p.UnitPrice = op.UnitPrice;
+                    p.UnitsInStock = op.UnitsInStock;
+                    p.UnitsOnOrder = op.UnitsOnOrder;
+                    clone.Product = p;
+                }
+
+                list.Add(clone);
+            }
+        }
+        return list.AsQueryable();
     }
 
     #endregion
